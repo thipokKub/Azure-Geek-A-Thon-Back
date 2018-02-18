@@ -179,7 +179,8 @@ function getScore(option) {
                             corpus: {
                                 ...newCorpus
                             },
-                            score: avg/countItem
+                            score: avg/countItem,
+                            balancedScore: (avg/countItem - 0.25)/(0.75 - 0.25)
                         }
                     }
 
