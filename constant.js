@@ -22,6 +22,8 @@ Exports.mongo = {
     },
 }
 
-Exports.azure_max = 100
+Exports.azure_max = 100;
+Exports.azure_text_key = '6a65a211209d45f6971a9e9caf0b6912';
+Exports.azure_default_lang = 'ja';
 
 module.exports = Exports;

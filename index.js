@@ -9,18 +9,7 @@ const client = new Twitter(Constant.twitter);
 const MongoClient = require('mongodb').MongoClient;
 const mongoose = require('mongoose');
 const request = require('request');
-// const Admin = mongoose.mongo.Admin;
-
-String.prototype.hashCode = function () {
-    var hash = 0, i, chr;
-    if (this.length === 0) return hash;
-    for (i = 0; i < this.length; i++) {
-        chr = this.charCodeAt(i);
-        hash = ((hash << 5) - hash) + chr;
-        hash |= 0; // Convert to 32bit integer
-    }
-    return hash;
-};
+const crypto = require('crypto');
 
 app.use(bodyParser.json());
 
@@ -46,7 +35,7 @@ app.get('/', (req, res) => {
                         ...data.reduce((obj, item) => {
                             return {
                                 ...obj,
-                                [item.hashCode()]: {
+                                [crypto.createHash('md5').update(item).digest("hex")]: {
                                     text: item,
                                     score: -1
                                 }
@@ -59,10 +48,67 @@ app.get('/', (req, res) => {
 
         res.send({
             name: query,
-            status: "OK"
+            status: "OK",
+            count: data.length
         });
     })
 });
+
+app.get('/score', (req, res) => {
+    getScore({
+        res: res,
+        query: req.query.term ? {
+            name: req.query.term
+        }  : {},
+        lang: req.query.lang ? req.query.lang : Constant.azure_default_lang
+    });
+})
+
+app.get('/sumScore', (req, res) => {
+    new Promise((resolve, reject) => {
+        const query = req.query.term || '';
+        getText(query).then((tweets) => {
+            return Array.from(new Set((tweets.statuses || []).map((item) => item.full_text)));
+        }).then((data) => {
+    
+            new Promise((res, rej) => connectDB(Constant.mongo.dbName, (dbo) => {
+                dbo.collection(Constant.mongo.cName.score).find({
+                    name: query
+                }).toArray(function (err, result) {
+                    if (err) return rej(err);
+                    return res(result)
+                })
+            })).then((result) => {
+                //Assume result is only 1 query at maximum
+                updateObj(Constant.mongo.dbName, Constant.mongo.cName.score, { name: query }, {
+                    $set: {
+                        corpus: {
+                            ...(result.length > 0 ? result[0].corpus : {}),
+                            ...data.reduce((obj, item) => {
+                                return {
+                                    ...obj,
+                                    [crypto.createHash('md5').update(item).digest("hex")]: {
+                                        text: item,
+                                        score: -1
+                                    }
+                                }
+                            }, {})
+                        }
+                    }
+                })
+                resolve(true);
+            })
+        })
+    }).then(() => {
+        getScore({
+            res: res,
+            query: req.query.term ? {
+                name: req.query.term
+            } : {},
+            lang: req.query.lang ? req.query.lang : Constant.azure_default_lang
+        });
+    })
+})
 
 function countObj(obj) {
     let count = 0;
@@ -72,16 +118,19 @@ function countObj(obj) {
     return count;
 }
 
-function getScore(query) {
-    query = query || {}
+function getScore(option) {
+    option = option || {}
+    query = option.query || {}
+    res = option.res || {send: (() => {})};
+    lang = option.lang || Constant.azure_default_lang;
 
-    connectDB(Constant.mongo.url, (dbo) => {
+    connectDB(Constant.mongo.dbName, (dbo) => {
         new Promise((resolve, reject) => {
             dbo.collection(Constant.mongo.cName.score).find(query).toArray((err, result) => {
                 if (err) throw err;
                 //create index reference
                 const nameIndex = result.map((item) => item.name)
-                let indexRef = result.map((item) => countObj(item))
+                let indexRef = result.map((item) => countObj(item.corpus))
     
                 //divide all corpus into maximum size chunk
                 const allChunks = result.map((item) => {
@@ -95,60 +144,91 @@ function getScore(query) {
                 for (i = 0, j = allChunks.length; i < j; i += Constant.azure_max) {
                     chunks.push(allChunks.slice(i, i + Constant.azure_max));
                 }
-
-                // const chunks = result.reduce((arr, item) => {
-                //     //convert corpus from object to array
-                //     corpus = Object.values(item.corpus).map((i) => i.text)
-    
-                //     //Too Lazy to optimize
-                //     while (corpus.length > 0) {
-                //         while (arr[arr.length - 1].length < Constant.azure_maximum && corpus.length > 0) {
-                //             arr[arr.length - 1] = arr[arr.length - 1].concat([corpus.shift()])
-                //         }
-                //         if (arr[arr.length - 1].length >= Constant.azure_maximum) {
-                //             arr = arr.concat([])
-                //         }
-                //     }
-                //     return arr;
-                // }, [[]]);
     
                 //get score info + process score into original format
-                const results = chunks;
-    
-                //combine results
-                const newChunks = results.reduce((arr, item) => {
-                    arr = arr.concat(item);
-                    return arr;
-                }, [])
-    
-                //put all chunk back together
-                //Buggy
                 let newObj = Array.from(result);
-                let newChunksIdx = 0;
-                for(let i = 0; i < indexRef.length; i++) {
-                    let newCorpus = [];
-                    const oldCorpus = Object.values(result[nameIndex[i]].corpus).map((i) => i.text)
-                    while(indexRef[i] > 0) {
-                        newCorpus[oldCorpus[oldCorpus.length - indexRef[i]].hashCode] = {
-                            text: oldCorpus[oldCorpus.length - indexRef[i]],
-                            score: newChunks[newChunksIdx].shift().score
-                        }
-                        if(newChunks[newChunksIdx] === 0) {
-                            newChunksIdx++;
-                        }
-                        indexRef[i]--;
-                    }
+                getScoreAzure(chunks, lang).then((results) => {
+                    //combine results
+                    const newChunks = results.reduce((arr, item) => {
+                        arr = arr.concat(item);
+                        return arr;
+                    }, [])
                     
-                    newObj[i] = {
-                        ...newObj[i],
-                        corpus: newCorpus
+
+                    //put all chunk back together
+
+                    let newChunksIdx = 0;
+                    for (let i = 0; i < indexRef.length; i++) {
+                        let avg = 0;
+                        let countItem = 0;
+                        let newCorpus = [];
+                        const oldCorpus = Object.values(result[i].corpus).map((i) => i.text)
+                        while (indexRef[i] > 0) {
+                            const item = newChunks.shift() || {}
+                            avg += parseFloat(item.score);
+                            countItem++;
+                            newCorpus[crypto.createHash('md5').update(oldCorpus[oldCorpus.length - indexRef[i]]).digest("hex")] = {
+                                text: oldCorpus[oldCorpus.length - indexRef[i]],
+                                score: item.score
+                            }
+                            indexRef[i]--;
+                        }
+
+                        newObj[i] = {
+                            ...newObj[i],
+                            corpus: {
+                                ...newCorpus
+                            },
+                            score: avg/countItem
+                        }
                     }
-                }
-    
-                resolve(newObj)
+
+                    resolve(newObj)
+                });
             })
-        })
+        }).then((data) => {
+            data.forEach((item) => {
+                dbo.collection(Constant.mongo.cName.score).update(
+                    { _id: item._id },
+                    item,
+                    { upsert: true, safe: false },
+                    (err, res) => {
+                        if (err) throw err;
+                    }
+                )
+            })
+            
+            res.send(data)
+        });
     });
+}
+
+function getScoreAzure(textChuk, lang) {
+    const PromisePool = textChuk.map((textBulk) => {
+        return (
+        new Promise((res, rej) => {
+            request.post({
+                url: `https://eastasia.api.cognitive.microsoft.com/text/analytics/v2.0/sentiment`,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Ocp-Apim-Subscription-Key": Constant.azure_text_key
+                },
+                body: JSON.stringify({
+                    "documents": textBulk.map((text, index) => {
+                        return ({
+                            "language": lang || Constant.azure_default_lang,
+                            "id": String(index + 1),
+                            "text": text
+                        });
+                    })
+                })
+            }, (error, response, body) => {
+                res(JSON.parse(body).documents)
+            })
+        }))
+    })
+
+    return Promise.all(PromisePool)
 }
 
 function getText(query) {
@@ -168,7 +248,7 @@ function connectDB(dbName, callback) {
         if (err) throw err;
         const dbo = db.db(dbName);
         const rObj = callback(dbo);
-        db.close();
+        // db.close();
         return rObj;
     })
 }
