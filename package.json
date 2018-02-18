@@ -1,0 +1,19 @@
+{
+  "name": "geek-a-thon-server",
+  "version": "0.0.0",
+  "description": "Backend for geek-a-thon",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^1.18.2",
+    "express": "^4.16.2",
+    "mongodb": "^3.0.2",
+    "mongoose": "^5.0.6",
+    "request": "^2.83.0",
+    "twitter": "^1.7.1"
+  }
+}
